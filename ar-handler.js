@@ -1,4 +1,5 @@
 import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/+esm";
+import { OneEuroFilter } from './smoothing.js';
 
 export class ARHandler {
   constructor(videoElement, onResults) {
@@ -7,11 +8,23 @@ export class ARHandler {
     this.isTracking = false;
     this.landmarker = null;
     this.lastVideoTime = -1;
+
+    // Smoothing filters for position, rotation (quaternion), and scale
+    this.filterX = new OneEuroFilter(30, 0.5, 0.01);
+    this.filterY = new OneEuroFilter(30, 0.5, 0.01);
+    this.filterZ = new OneEuroFilter(30, 0.5, 0.01);
+    this.filterScale = new OneEuroFilter(30, 1.0, 0.05);
+    
+    // Quaternion filters (4 components)
+    this.filterQX = new OneEuroFilter(30, 0.1, 0.01);
+    this.filterQY = new OneEuroFilter(30, 0.1, 0.01);
+    this.filterQZ = new OneEuroFilter(30, 0.1, 0.01);
+    this.filterQW = new OneEuroFilter(30, 0.1, 0.01);
   }
 
   async start() {
     if (this.isTracking) return;
-    console.log('Initializing MediaPipe Tasks Landmarker v0.10.0...');
+    console.log('Initializing Advanced MediaPipe HandLandmarker...');
 
     try {
       this.videoElement.style.display = 'block';
@@ -26,21 +39,34 @@ export class ARHandler {
           delegate: "GPU"
         },
         runningMode: "VIDEO",
-        numHands: 1
+        numHands: 1,
+        minHandDetectionConfidence: 0.7,
+        minHandPresenceConfidence: 0.7,
+        minTrackingConfidence: 0.7
       });
 
-      console.log('Landmarker ready, starting camera...');
+      console.log('Advanced Landmarker ready. Requesting camera...');
       
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
-          width: 1280, 
-          height: 720, 
-          facingMode: 'environment' 
-        } 
-      });
+      const constraints = {
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280, max: 1920 },
+          height: { ideal: 720, max: 1080 },
+          frameRate: { ideal: 30 }
+        }
+      };
+
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (err) {
+        console.warn('Primary constraints failed, retrying with basic video...');
+        stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      }
 
       this.videoElement.srcObject = stream;
       this.videoElement.addEventListener('loadeddata', () => {
+        console.log('Video stream loaded and playing.');
         this.videoElement.play();
         this.isTracking = true;
         this.predictLoop();
@@ -48,7 +74,7 @@ export class ARHandler {
 
     } catch (err) {
       console.error('AR Startup Failure:', err);
-      alert(`Critical AR Error: ${err.message}`);
+      alert(`Camera Error: ${err.name}\n${err.message}\n\nPlease ensure no other app is using the camera.`);
     }
   }
 
@@ -74,98 +100,81 @@ export class ARHandler {
   }
 
   processResults(results) {
-    if (!results.landmarks || results.landmarks.length === 0) {
+    if (!results.landmarks || results.landmarks.length === 0 || !results.worldLandmarks) {
       this.onResults({ visible: false });
       return;
     }
 
     const landmarks = results.landmarks[0];
-    const handedness = (results.handedness && results.handedness[0] && results.handedness[0][0]) 
-                       ? results.handedness[0][0].label : "Right";
-    
-    // MCP and PIP of ring finger (13, 14)
-    const mcp = landmarks[13];
-    const pip = landmarks[14];
+    const worldLandmarks = results.worldLandmarks[0];
+    const now = performance.now();
 
-    // Knuckles for palm plane (5, 17)
-    const indexMcp = landmarks[5];
-    const pinkyMcp = landmarks[17];
+    // MCP and PIP of ring finger (13, 14) from WORLD coordinates for better orientation
+    const wMcp = worldLandmarks[13];
+    const wPip = worldLandmarks[14];
+    const wIndexMcp = worldLandmarks[5];
+    const wPinkyMcp = worldLandmarks[17];
 
-    const sw = window.innerWidth;
-    const sh = window.innerHeight;
+    const vMcp = new THREE.Vector3(wMcp.x, wMcp.y, wMcp.z);
+    const vPip = new THREE.Vector3(wPip.x, wPip.y, wPip.z);
+    const vIndex = new THREE.Vector3(wIndexMcp.x, wIndexMcp.y, wIndexMcp.z);
+    const vPinky = new THREE.Vector3(wPinkyMcp.x, wPinkyMcp.y, wPinkyMcp.z);
 
-    const getW = (lm) => {
-      // COORDINATE MAPPING: 
-      // MediaPipe (0,0) is TOP-LEFT. 
-      // Three.js (0,0) is CENTER.
-      // lm.x/y/z are normalized [0,1].
-      
-      // We map to "View Space" first
-      const vFOV = 60 * Math.PI / 180;
-      const cameraZ = 5;
-      const viewH = 2 * Math.tan(vFOV / 2) * cameraZ;
-      const aspect = sw / sh;
-      const viewW = viewH * aspect;
-
-      // X-Axis Orientation Check: 
-      // If we are in environment mode, we don't flip. 
-      // If in front mode, we flip (1 - lm.x). 
-      // Given the user reported "mirrored again", let's provide a stable screen-centric mapping.
-      const worldX = (lm.x - 0.5) * viewW;
-      const worldY = -(lm.y - 0.5) * viewH;
-      const worldZ = -cameraZ + (lm.z * 5); // Z is depth relative to hand
-
-      return new THREE.Vector3(worldX, worldY, worldZ);
-    };
-
-    const w1 = getW(mcp);
-    const w2 = getW(pip);
-    const wIndex = getW(indexMcp);
-    const wPinky = getW(pinkyMcp);
-
-    // 1. FORWARD: Along the finger
-    const forward = new THREE.Vector3().subVectors(w2, w1).normalize();
-
-    // 2. SIDE: Across the knuckles
-    const side = new THREE.Vector3().subVectors(wIndex, wPinky).normalize();
-
-    // 3. UP: Normal to the hand plane
-    // For Right hand, (side x forward) points UP (back of hand).
-    // For Left hand, we might need to flip if we want the same "UP" behavior.
+    // Calculate basis vectors in hand's local coordinate system
+    const forward = new THREE.Vector3().subVectors(vPip, vMcp).normalize();
+    const side = new THREE.Vector3().subVectors(vIndex, vPinky).normalize();
     let up = new THREE.Vector3().crossVectors(side, forward).normalize();
     
-    // Handedness Correction: 
-    // If the cross product points 'down' (into the palm), flip it.
-    // We check against the Z-axis (pointing away from camera).
-    if (up.z > 0) up.multiplyScalar(-1);
-
-    // 4. RIGHT: Completing the basis
+    // Ensure 'up' points towards the back of the hand (relative to wrist origin)
+    if (up.dot(new THREE.Vector3(0, 0, -1)) < 0) up.multiplyScalar(-1);
+    
     const right = new THREE.Vector3().crossVectors(up, forward).normalize();
-
     const rotationMatrix = new THREE.Matrix4().makeBasis(right, up, forward);
-    const quaternion = new THREE.Quaternion().setFromRotationMatrix(rotationMatrix);
+    const rawQuaternion = new THREE.Quaternion().setFromRotationMatrix(rotationMatrix);
 
-    // POSITION: Midpoint of finger segment
-    const worldPos = new THREE.Vector3().addVectors(w1, w2).multiplyScalar(0.5);
-    // Add offset based on the 'up' vector to sit on the skin surface
-    worldPos.add(up.clone().multiplyScalar(0.08));
+    // Coordinate Mapping for Screen Position (using normalized landmarks)
+    const sw = window.innerWidth;
+    const sh = window.innerHeight;
+    const vFOV = 60 * Math.PI / 180;
+    const cameraZ = 5;
+    const viewH = 2 * Math.tan(vFOV / 2) * cameraZ;
+    const aspect = sw / sh;
+    const viewW = viewH * aspect;
 
-    // SCALE: Based on finger length
-    const fingerLen = w1.distanceTo(w2);
-    const ringScale = fingerLen * 0.45;
+    const ringMcp = landmarks[13];
+    const ringPip = landmarks[14];
+    
+    const screenX = ( (ringMcp.x + ringPip.x) / 2 - 0.5 ) * viewW;
+    const screenY = -( (ringMcp.y + ringPip.y) / 2 - 0.5 ) * viewH;
+    const screenZ = -cameraZ + ( (ringMcp.z + ringPip.z) / 2 * 5 );
+
+    // Apply Smoothing Filters
+    const posX = this.filterX.filter(screenX, now);
+    const posY = this.filterY.filter(screenY, now);
+    const posZ = this.filterZ.filter(screenZ, now);
+
+    const qX = this.filterQX.filter(rawQuaternion.x, now);
+    const qY = this.filterQY.filter(rawQuaternion.y, now);
+    const qZ = this.filterQZ.filter(rawQuaternion.z, now);
+    const qW = this.filterQW.filter(rawQuaternion.w, now);
+    const smoothedQuaternion = new THREE.Quaternion(qX, qY, qZ, qW).normalize();
+
+    // Scale calculation (based on finger segment length in world coordinates)
+    const fingerLenWorld = vMcp.distanceTo(vPip);
+    const rawScale = fingerLenWorld * 12; // Adjusted multiplier for meters-to-scene units
+    const smoothedScale = this.filterScale.filter(rawScale, now);
 
     // Detect if back of hand is facing camera
-    const toCamera = new THREE.Vector3().copy(worldPos).negate().normalize();
-    const isBackFacing = up.dot(toCamera) > 0;
+    const toCamera = new THREE.Vector3(0, 0, 1); // Fixed camera direction
+    const isBackFacing = up.dot(toCamera) < 0;
 
     this.onResults({
       visible: true,
-      position: worldPos,
-      rotation: quaternion,
-      scale: ringScale,
+      position: new THREE.Vector3(posX, posY, posZ),
+      rotation: smoothedQuaternion,
+      scale: smoothedScale,
       landmarks: landmarks,
-      isBackFacing: isBackFacing,
-      videoParams: { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0 }
+      isBackFacing: isBackFacing
     });
   }
 }

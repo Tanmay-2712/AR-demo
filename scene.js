@@ -17,10 +17,20 @@ export class SceneManager {
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.05;
+    this.controls.enableRotate = false; // Disable camera rotation manually to handle ring rotation instead
+    this.controls.enablePan = false;    // Disable right-click panning
 
     this.initLights();
     this.currentRing = null;
     this.mode = 'preview';
+    this.introAnimator = null; // set externally to drive intro animation
+    this._lastTime = performance.now();
+
+    // Interaction State for Ring Rotation
+    this.isDragging = false;
+    this.previousMousePosition = { x: 0, y: 0 };
+    this.ringRotationSpeed = 0.01;
+    this.initInteraction();
 
     // Mask Group for Occlusion
     this.maskGroup = new THREE.Group();
@@ -29,34 +39,103 @@ export class SceneManager {
 
     window.addEventListener('resize', () => this.onWindowResize());
     
-    // Initial Mode Setup (Ensure everything is framed correctly on startup)
-    setTimeout(() => this.setMode('preview'), 100); 
+    // Mode is set externally (by main.js) after intro completes
     this.animate();
   }
 
-  initLights() {
-    this.studioBackground = new THREE.Color(0x222222);
-    this.scene.background = this.studioBackground;
-    
-    this.grid = new THREE.GridHelper(20, 20, 0x444444, 0x333333);
-    this.grid.position.y = -1;
-    this.scene.add(this.grid);
+  initInteraction() {
+    const handleStart = (x, y, e) => {
+      // If intro is active and idle, check if we clicked the box
+      if (this.introAnimator && this.introAnimator.phase === 'idle') {
+        const mouse = new THREE.Vector2(
+          (x / window.innerWidth) * 2 - 1,
+          -(y / window.innerHeight) * 2 + 1
+        );
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(mouse, this.camera);
+        const intersects = raycaster.intersectObjects(this.scene.children, true);
+        
+        const hitBox = intersects.some(hit => hit.object.userData.isBoxPart);
+        if (hitBox) {
+          this.introAnimator._startOpening();
+          return;
+        }
+      }
 
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+      if (this.mode !== 'preview') return;
+      this.isDragging = true;
+      this.previousMousePosition = { x, y };
+    };
+
+    const handleMove = (x, y) => {
+      if (!this.isDragging || !this.currentRing || this.mode !== 'preview') return;
+      
+      const deltaX = x - this.previousMousePosition.x;
+      const deltaY = y - this.previousMousePosition.y;
+
+      // Rotate around Y axis for horizontal movement
+      this.currentRing.rotation.y += deltaX * this.ringRotationSpeed;
+      // Rotate around X axis for vertical movement
+      this.currentRing.rotation.x += deltaY * this.ringRotationSpeed;
+
+      this.previousMousePosition = { x, y };
+    };
+
+    const handleEnd = () => {
+      this.isDragging = false;
+    };
+
+    this.renderer.domElement.addEventListener('mousedown', (e) => handleStart(e.clientX, e.clientY));
+    window.addEventListener('mousemove', (e) => handleMove(e.clientX, e.clientY));
+    window.addEventListener('mouseup', handleEnd);
+
+    this.renderer.domElement.addEventListener('touchstart', (e) => {
+      if (e.touches.length > 0) handleStart(e.touches[0].clientX, e.touches[0].clientY);
+    }, { passive: true });
+    window.addEventListener('touchmove', (e) => {
+      if (e.touches.length > 0) handleMove(e.touches[0].clientX, e.touches[0].clientY);
+    }, { passive: true });
+    window.addEventListener('touchend', handleEnd);
+  }
+
+  initLights() {
+    this.studioBackground = null; // Let CSS gradient show through
+    this.scene.background = null;
+    
+    // Grid removed as requested
+    
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4); // Subtle ambient
     this.scene.add(ambientLight);
 
-    // Dynamic AR High-Intensity Light
-    this.hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.0);
-    this.hemiLight.visible = false;
-    this.scene.add(this.hemiLight);
-
-    this.mainLight = new THREE.DirectionalLight(0xffffff, 1.5);
-    this.mainLight.position.set(5, 10, 7.5);
+    // Key Light
+    this.mainLight = new THREE.DirectionalLight(0xffffff, 2.5);
+    this.mainLight.position.set(4, 6, 5);
     this.scene.add(this.mainLight);
 
-    this.goldFill = new THREE.PointLight(0xD4AF37, 1.5);
-    this.goldFill.position.set(0, -2, 2);
-    this.scene.add(this.goldFill);
+    // Fill Light (Warm)
+    const filler = new THREE.DirectionalLight(0xffccaa, 1.2);
+    filler.position.set(-4, 2, 3);
+    this.scene.add(filler);
+
+    // Rim Light (Cool)
+    const rim = new THREE.DirectionalLight(0xaabbff, 1.5);
+    rim.position.set(0, 4, -8);
+    this.scene.add(rim);
+
+    // Subtle Point Light for gem pop
+    const gemPop = new THREE.PointLight(0xffffff, 2.0, 5);
+    gemPop.position.set(0, 2, 1);
+    this.scene.add(gemPop);
+
+    // Studio "Softbox"
+    const areaLight = new THREE.RectAreaLight(0xffffff, 8.0, 6, 6);
+    areaLight.position.set(0, 8, 2);
+    areaLight.lookAt(0, 0, 0);
+    this.scene.add(areaLight);
+
+    // Floor Plane (Infinity Cove)
+
+    this.scene.environment = this._createEnvMap();
   }
 
   onWindowResize() {
@@ -65,50 +144,61 @@ export class SceneManager {
     this.renderer.setSize(window.innerWidth, window.innerHeight);
   }
 
+  // Public wrapper for external use (e.g. gift box intro)
+  createRingMesh(ringData) {
+    return this.createProperRing(ringData);
+  }
+
   createProperRing(ringData) {
     const group = new THREE.Group();
+    const style = ringData.style || 'solitaire';
 
-    // Standard Torus: hole is in Z direction (0,0,1)
+    // METAL MATERIAL - Luxury setting
     const bandMat = new THREE.MeshPhysicalMaterial({
       color: ringData.color,
-      metalness: 1.0, roughness: 0.1, reflectivity: 1, clearcoat: 1.0
+      metalness: 1.0, 
+      roughness: 0.05, 
+      reflectivity: 1.0, 
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.05
     });
-    
-    // TORUS Geometry (radius, tube, radialSegments, tubularSegments)
-    // Base radius is 0.5 units
-    const band = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.05, 32, 128), bandMat);
+
+    // Ring Band
+    const band = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.045, 32, 128), bandMat);
     group.add(band);
 
-    const setting = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.1, 0.1, 16), bandMat);
-    setting.position.set(0, 0.5, 0); // At top of the ring
-    group.add(setting);
-
+    // GEM MATERIAL
     const gemMat = new THREE.MeshPhysicalMaterial({
       color: ringData.gemColor || 0xffffff,
-      transmission: 0.95, thickness: 0.5, ior: 2.4, iridescence: 0.6
+      transmission: 0.98,
+      thickness: 0.8,
+      ior: 2.417, // Diamond IOR
+      iridescence: 0.5,
+      reflectivity: 1.0,
+      metalness: 0,
+      roughness: 0,
+      opacity: 1,
+      transparent: true
     });
-    const gem = new THREE.Mesh(new THREE.IcosahedronGeometry(0.18, 0), gemMat);
-    gem.position.set(0, 0.6, 0);
-    group.add(gem);
 
-    // Prongs
-    for (let i = 0; i < 4; i++) {
-        const prong = new THREE.Mesh(new THREE.CylinderGeometry(0.015, 0.015, 0.2), bandMat);
-        const angle = (i / 4) * Math.PI * 2 + Math.PI / 4;
-        prong.position.set(Math.cos(angle) * 0.12, 0.58, Math.sin(angle) * 0.12);
-        prong.lookAt(0, 0.8, 0);
-        prong.rotateX(Math.PI / 2);
-        group.add(prong);
+    // STYLE-SPECIFIC LOGIC
+    if (style === 'solitaire') {
+      this._addSolitaireSetting(group, ringData, bandMat, gemMat);
+    } else if (style === 'halo') {
+      this._addHaloSetting(group, ringData, bandMat, gemMat);
+    } else if (style === 'three-stone') {
+      this._addThreeStoneSetting(group, ringData, bandMat, gemMat);
+    } else if (style === 'pave') {
+      this._addPaveSetting(group, ringData, bandMat, gemMat);
     }
 
     // THE MAGIC OCCLUDER: Cylinder aligned with the hole (Z axis)
-    // Bigger radius (0.47) and very long to avoid edge artifacts
     const occluder = new THREE.Mesh(
       new THREE.CylinderGeometry(0.47, 0.47, 10, 32),
       new THREE.MeshBasicMaterial({ colorWrite: false })
     );
-    occluder.rotation.x = Math.PI / 2; // Point along Z
-    occluder.renderOrder = -1; // Draw before ring
+    occluder.rotation.x = Math.PI / 2;
+    occluder.renderOrder = -1;
     this.ringOccluder = occluder;
     group.add(occluder);
 
@@ -122,6 +212,111 @@ export class SceneManager {
     group.add(this.debugPoint);
 
     return group;
+  }
+
+  // Generate a synthetic environment map for high-end reflections
+  _createEnvMap() {
+    const size = 64;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+
+    // Create a "studio" gradient
+    const grad = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+    grad.addColorStop(0, '#ffffff');
+    grad.addColorStop(0.2, '#bbbbbb');
+    grad.addColorStop(1, '#111111');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+
+    // Add some "lights"
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(size * 0.2, size * 0.2, size * 0.3, size * 0.1);
+    ctx.fillRect(size * 0.6, size * 0.7, size * 0.2, size * 0.2);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.mapping = THREE.EquirectangularReflectionMapping;
+    return tex;
+  }
+
+  _getGemGeo(cut, size) {
+    if (cut === 'emerald') {
+      return new THREE.BoxGeometry(size * 1.2, size * 0.8, size * 1.5);
+    } else if (cut === 'cushion') {
+      return new THREE.IcosahedronGeometry(size, 2); // Smoother
+    } else if (cut === 'diamond') {
+      return new THREE.ConeGeometry(size, size * 1.5, 8); // Traditional diamond shape point down
+    }
+    return new THREE.OctahedronGeometry(size, 0); // Default round-ish cut
+  }
+
+  _addSolitaireSetting(group, data, bMat, gMat) {
+    const setting = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.08, 0.15, 16), bMat);
+    setting.position.set(0, 0.52, 0);
+    group.add(setting);
+
+    const gem = new THREE.Mesh(this._getGemGeo(data.cut, 0.18), gMat);
+    gem.position.set(0, 0.62, 0);
+    if (data.cut === 'diamond') gem.rotation.x = Math.PI; 
+    group.add(gem);
+  }
+
+  _addHaloSetting(group, data, bMat, gMat) {
+    const mainGem = new THREE.Mesh(this._getGemGeo(data.cut, 0.16), gMat);
+    mainGem.position.set(0, 0.62, 0);
+    group.add(mainGem);
+
+    // Halo ring
+    const halo = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.04, 16, 64), bMat);
+    halo.position.set(0, 0.6, 0);
+    halo.rotation.x = Math.PI / 2;
+    group.add(halo);
+
+    // Small halo gems
+    const smallGemMat = gMat.clone();
+    smallGemMat.thickness = 0.2;
+    for (let i = 0; i < 12; i++) {
+        const gem = new THREE.Mesh(new THREE.IcosahedronGeometry(0.035, 0), smallGemMat);
+        const angle = (i / 12) * Math.PI * 2;
+        gem.position.set(Math.cos(angle) * 0.2, 0.62, Math.sin(angle) * 0.2);
+        group.add(gem);
+    }
+  }
+
+  _addThreeStoneSetting(group, data, bMat, gMat) {
+    // Center gem
+    const centerGem = new THREE.Mesh(this._getGemGeo(data.cut, 0.18), gMat);
+    centerGem.position.set(0, 0.62, 0);
+    group.add(centerGem);
+
+    // Side gems
+    const sideGemGeo = this._getGemGeo(data.cut, 0.12);
+    const s1 = new THREE.Mesh(sideGemGeo, gMat);
+    s1.position.set(0.18, 0.55, 0);
+    s1.rotation.z = -0.3;
+    group.add(s1);
+
+    const s2 = new THREE.Mesh(sideGemGeo, gMat);
+    s2.position.set(-0.18, 0.55, 0);
+    s2.rotation.z = 0.3;
+    group.add(s2);
+  }
+
+  _addPaveSetting(group, data, bMat, gMat) {
+    const mainGem = new THREE.Mesh(this._getGemGeo(data.cut, 0.18), gMat);
+    mainGem.position.set(0, 0.62, 0);
+    group.add(mainGem);
+
+    // Band gems
+    const smallGemMat = gMat.clone();
+    for (let i = 0; i < 20; i++) {
+        const gem = new THREE.Mesh(new THREE.IcosahedronGeometry(0.025, 0), smallGemMat);
+        const angle = (i / 20) * Math.PI * 0.6 - (Math.PI * 0.3); // Top half only
+        const r = 0.54;
+        gem.position.set(Math.cos(angle + Math.PI/2) * r, Math.sin(angle + Math.PI/2) * r, 0);
+        group.add(gem);
+    }
   }
 
   addRing(ringData) {
@@ -196,19 +391,16 @@ export class SceneManager {
     }
     
     this.currentRing.visible = true;
-    const { position, rotation, scale, landmarks, videoParams, isBackFacing } = results;
+    const { position, rotation, scale, landmarks, isBackFacing } = results;
 
-    // Faster tracking for ultra-responsive feel
-    this.currentRing.position.lerp(position, 0.6);
-    this.currentRing.quaternion.slerp(rotation, 0.45);
-    
-    // Smooth scale adjustment
-    const targetScale = scale * 0.95; 
-    this.currentRing.scale.set(targetScale, targetScale, targetScale);
+    // Direct assignment as smoothing is handled in the handler
+    this.currentRing.position.copy(position);
+    this.currentRing.quaternion.copy(rotation);
+    this.currentRing.scale.set(scale, scale, scale);
 
     if (landmarks) {
-      this.updateSkeleton(landmarks, videoParams, isBackFacing);
-      this.updateHandMask(landmarks, videoParams);
+      this.updateSkeleton(landmarks, null, isBackFacing);
+      this.updateHandMask(landmarks);
     }
   }
 
@@ -371,11 +563,21 @@ export class SceneManager {
 
   animate() {
     requestAnimationFrame(() => this.animate());
+
+    const now = performance.now();
+    const dt = Math.min((now - this._lastTime) / 1000, 0.05); // cap dt at 50ms
+    this._lastTime = now;
+
+    // Drive intro animation if active
+    if (this.introAnimator) {
+      const done = this.introAnimator.update(dt);
+      if (done) this.introAnimator = null;
+    }
+
     this.controls.update();
     
     if (this.currentRing && this.mode === 'preview') {
-      this.currentRing.rotation.y += 0.005;
-      this.currentRing.position.y = Math.sin(Date.now() * 0.002) * 0.05;
+      this.currentRing.position.y = Math.sin(Date.now() * 0.002) * 0.04;
     }
     
     this.renderer.render(this.scene, this.camera);
