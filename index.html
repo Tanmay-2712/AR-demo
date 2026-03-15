@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>The Heritage | Augmented Reality</title>
+    <link rel="stylesheet" href="./style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    
+</head>
+<body>
+    <div id="app">
+        <!-- Luxury Intro Overlay -->
+        <div id="intro-overlay">
+            <h1 class="pulsate" style="color: var(--primary-gold); margin-bottom: 60px; font-weight: 800; letter-spacing: 0.5em; text-transform: uppercase; font-size: 1.5rem;">The Heritage</h1>
+            
+            <div class="gift-box-container" id="gift-box">
+                <div class="box">
+                    <div class="ribbon-v"></div>
+                    <div class="ribbon-h"></div>
+                    <div class="box-lid">REVEAL COLLECTION</div>
+                </div>
+            </div>
+            
+            <p style="margin-top: 60px; color: rgba(255,255,255,0.4); letter-spacing: 0.2em; font-size: 10px; text-transform: uppercase;">A Private Experience</p>
+        </div>
+
+        <!-- AR Video Background -->
+        <video id="ar-video" playsinline></video>
+        
+        <!-- Three.js Canvas Container -->
+        <div id="canvas-container"></div>
+
+        <!-- UI Overlay -->
+        <div id="ui-overlay" class="ui-panel hidden">
+            <!-- Top Navigation -->
+            <div class="top-controls">
+                <div class="mode-selector">
+                    <button id="btn-preview" class="mode-btn active">Gallery</button>
+                    <button id="btn-tryon" class="mode-btn">Try-On</button>
+                </div>
+            </div>
+
+            <!-- Bottom Catalogue -->
+            <div class="bottom-controls">
+                <div class="catalogue-container">
+                    <div class="catalogue-scroll" id="ring-catalogue">
+                        <!-- Items injected by JS -->
+                    </div>
+                </div>
+                <button id="btn-debug" class="debug-btn">Toggle Debug</button>
+            </div>
+        </div>
+    </div>
+    <script type="module" src="./main.js"></script>
+</body>
+</html>
